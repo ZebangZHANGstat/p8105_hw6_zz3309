@@ -1,0 +1,234 @@
+---
+title: "P8105_hw6_zz3309"
+author: "Zebang Zhang"
+date: 2024-12-2
+output: github_document
+---
+
+```{r}
+library(tidyverse)
+library(broom)
+library(purrr)
+library(modelr)
+library(rsample)
+```
+
+# Problem 1
+
+```{r}
+#load data
+weather_df = 
+  rnoaa::meteo_pull_monitors(
+    c("USW00094728"),
+    var = c("PRCP", "TMIN", "TMAX"), 
+    date_min = "2017-01-01",
+    date_max = "2017-12-31") %>%
+  mutate(
+    name = recode(id, USW00094728 = "CentralPark_NY"),
+    tmin = tmin / 10,
+    tmax = tmax / 10) %>%
+  select(name, id, everything())
+```
+
+```{r}
+set.seed(1)
+
+bootstrap_results <- replicate(5000, {
+  sample_indices <- sample(1:nrow(weather_df), replace = TRUE)
+  bootstrap_sample <- weather_df[sample_indices, ]
+
+  fit <- lm(tmax ~ tmin, data = bootstrap_sample)
+  
+  r_squared <- glance(fit)$r.squared
+  
+  coefficients <- tidy(fit)
+  log_beta_product <- log(coefficients$estimate[1] * coefficients$estimate[2])
+
+  c(r_squared, log_beta_product)
+}, simplify = TRUE)
+
+```
+
+```{r}
+bootstrap_df <- data.frame(
+  r_squared = bootstrap_results[1, ],
+  log_beta_product = bootstrap_results[2, ]
+)
+```
+
+```{r}
+#distribution of r^2
+ggplot(bootstrap_df, aes(x = r_squared)) +
+  geom_density(fill = "skyblue", alpha = 0.5) +
+  labs(title = "Bootstrap Distribution of R²",
+       x = "R²",
+       y = "Density")
+
+#distribution of log_beta_product
+ggplot(bootstrap_df, aes(x = log_beta_product)) +
+  geom_density(fill = "lightgreen", alpha = 0.5) +
+  labs(title = "Bootstrap Distribution of log(β1 * β0)",
+       x = "log(β0 * β1)",
+       y = "Density")
+
+```
+
+```{r}
+r_squared_ci <- quantile(bootstrap_df$r_squared, probs = c(0.025, 0.975))
+log_beta_product_ci <- quantile(bootstrap_df$log_beta_product, probs = c(0.025, 0.975))
+
+print(paste("95% CI of R²:", r_squared_ci[1], " - ", r_squared_ci[2]))
+print(paste("95% CI of log(β₀ * β₁):", log_beta_product_ci[1], " - ", log_beta_product_ci[2]))
+```
+
+# Problem 2
+
+```{r}
+homicide_df=read_csv("homicide-data.csv")
+names(homicide_df)
+```
+
+```{r}
+homicide_df <- homicide_df %>%
+  mutate(city_state = paste(city, state, sep = ", "),
+         solved = ifelse(disposition == "Closed by arrest", 1, 0)) %>%
+  filter(!city_state %in% c("Dallas, TX", "Phoenix, AZ", "Kansas City, MO", "Tulsa, AL"),
+         victim_race %in% c("White", "Black")) %>%
+  mutate(victim_age = as.numeric(victim_age))
+```
+
+```{r}
+baltimore_model <- glm(solved ~ victim_age + victim_sex + victim_race, 
+                       data = filter(homicide_df, city_state == "Baltimore, MD"),
+                       family = binomial)
+```
+
+```{r}
+baltimore_results <- broom::tidy(baltimore_model) %>%
+  filter(term == "victim_sexMale") %>%
+  mutate(OR = exp(estimate),
+         CI_lower = exp(estimate - qnorm(0.975) * std.error),
+         CI_upper = exp(estimate + qnorm(0.975) * std.error)) %>%
+  select(term, OR, CI_lower, CI_upper)
+baltimore_results
+```
+
+```{r}
+city_models <- homicide_df %>%
+  nest(data = -city_state) %>%
+  mutate(model = map(data, ~ glm(solved ~ victim_age + victim_sex + victim_race, 
+                                 data = .x, family = binomial)),
+         results = map(model, ~ broom::tidy(.x) %>%
+                         filter(term == "victim_sexMale") %>%
+                         mutate(OR = exp(estimate),
+                                CI_lower = exp(estimate - qnorm(0.975) * std.error),
+                                CI_upper = exp(estimate + qnorm(0.975) * std.error)))) %>%
+  unnest(results) %>%
+  select(city_state, OR, CI_lower, CI_upper)
+
+city_models
+```
+
+```{r}
+city_models %>%
+  ggplot(aes(x = reorder(city_state, OR), y = OR)) +
+  geom_point() +
+  geom_errorbar(aes(ymin = CI_lower, ymax = CI_upper), width = 0.2) +
+  coord_flip() +
+  labs(title = "Estimated ORs and CIs for each city",
+       x = "City",
+       y = "Odds Ratio (Male vs Female Victims)") +
+  theme_minimal()
+```
+
+We can see from the plot that in most cities, the odds ratio for solving homicides involving male victims compared to female victims is less than 1. This suggests that homicides involving male victims are less likely to be solved compared to those involving female victims across these cities. 
+
+# Problem 3
+
+```{r}
+bw_df=read_csv("birthweight.csv")
+```
+
+```{r}
+bw_df <- bw_df %>%
+  mutate(
+    babysex = factor(babysex, levels = c(1, 2), labels = c("Male", "Female")),
+    malform = factor(malform, levels = c(0, 1), labels = c("Absent", "Present")),
+    frace = factor(frace, levels = c(1, 2, 3, 4, 8, 9),
+                   labels = c("White", "Black", "Asian", "Puerto Rican", "Other", "Unknown")),
+    mrace = factor(mrace, levels = c(1, 2, 3, 4, 8),
+                   labels = c("White", "Black", "Asian", "Puerto Rican", "Other"))
+  ) %>%
+  drop_na()
+```
+
+```{r}
+birthweight_model <- lm(bwt ~ babysex + bhead + blength + delwt + gaweeks + wtgain + smoken + ppbmi, data = bw_df)
+```
+
+
+```{r}
+bw_df <- bw_df %>%
+  add_predictions(birthweight_model) %>%
+  add_residuals(birthweight_model)
+
+ggplot(bw_df, aes(x = pred, y = resid)) +
+  geom_point(alpha=0.3) +
+  labs(title = "Residuals vs Fitted Values for Birthweight Model",
+       x = "Fitted Values (Predicted Birthweight)",
+       y = "Residuals") +
+  theme_minimal()
+```
+
+```{r}
+model_1 <- lm(bwt ~ blength + gaweeks, data = bw_df)
+model_2 <- lm(bwt ~ bhead * blength * babysex, data = bw_df)
+```
+
+```{r}
+set.seed(1)
+
+cv_splits <- crossv_mc(bw_df, 100)
+
+cv_results <- cv_splits %>%
+  mutate(
+    model_main = map(train, ~ lm(bwt ~ babysex + bhead + blength + delwt + gaweeks + wtgain + smoken + ppbmi, data = .x)),
+    model_1 = map(train, ~ lm(bwt ~ blength + gaweeks, data = .x)),
+    model_2 = map(train, ~ lm(bwt ~ bhead * blength * babysex, data = .x)),
+    rmse_main_model = map2_dbl(model_main, test, ~ rmse(.x, .y)),
+    rmse_model1 = map2_dbl(model_1, test, ~ rmse(.x, .y)),
+    rmse_model2 = map2_dbl(model_2, test, ~ rmse(.x, .y))
+  )
+```
+
+```{r}
+cv_summary <- cv_results %>%
+  summarise(
+    rmse_main = mean(rmse_main_model),
+    rmse_1 = mean(rmse_model1),
+    rmse_2 = mean(rmse_model2)
+  )
+
+cv_summary
+```
+
+```{r}
+cv_results_long <- cv_results %>%
+  select(rmse_main_model, rmse_model1, rmse_model2) %>%
+  pivot_longer(cols = everything(), names_to = "model", values_to = "rmse")
+
+ggplot(cv_results_long, aes(x = model, y = rmse, fill = model)) +
+  geom_violin() +
+  labs(title = "RMSE Comparison Across Models",
+       x = "Model",
+       y = "RMSE") +
+  theme_minimal() 
+
+ggplot(cv_results_long, aes(x = rmse, y = model, fill = model)) +
+  ggridges::geom_density_ridges(alpha = 0.5) +
+  labs(title = "Density Plot of RMSE for Each Model",
+       x = "RMSE",
+       y = "Density") +
+  theme_minimal()
+```
+
